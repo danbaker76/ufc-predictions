@@ -1,0 +1,19 @@
+# Virtual environment
+ufc-venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Database (keep ignored – the API uses CSV directly)
+*.db
+
+# IDE / OS files
+.DS_Store
+.vscode/
+.idea/
+
+# Environment variables
+.env

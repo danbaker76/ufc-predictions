@@ -33,3 +33,4 @@ Werkzeug==3.1.8
 xgboost==2.1.4
 zipp==3.23.1
 flask-cors
+flask-cors

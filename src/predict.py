@@ -37,8 +37,7 @@ def load_fighter_stats(name, fighter_df):
     """Return a dict with keys matching the feature suffixes (e.g. 'Height', 'SLpM', 'age')."""
     row = fighter_df[fighter_df['fighter_name'] == name]
     if row.empty:
-        print(f"Fighter '{name}' not found in database.")
-        sys.exit(1)
+        raise ValueError(f"Fighter '{name}' not found in database.")
     row = row.iloc[0]
     stats = {
         'Height': height_to_inches(row.get('Height')),

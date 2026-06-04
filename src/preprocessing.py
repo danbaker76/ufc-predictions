@@ -1,94 +1,3 @@
-import pandas as pd
-import numpy as np
-import os
-import re
-from src.db_utils import save_to_db
-
-RAW_DIR = "data/raw"
-PROCESSED_DIR = "data/processed"
-
-# --- Utility parsers (unchanged) ---
-def pct_to_float(series):
-    return series.str.rstrip('%').astype(float) / 100
-
-def height_to_inches(height_str):
-    if pd.isna(height_str): return np.nan
-    match = re.match(r"(\d+)'\s*(\d+)\"?", str(height_str))
-    if match:
-        feet, inches = int(match.group(1)), int(match.group(2))
-        return feet * 12 + inches
-    return np.nan
-
-def weight_to_float(weight_str):
-    if pd.isna(weight_str): return np.nan
-    num = re.findall(r"[\d.]+", str(weight_str))
-    return float(num[0]) if num else np.nan
-
-def reach_to_float(reach_str):
-    if pd.isna(reach_str): return np.nan
-    num = re.findall(r"[\d.]+", str(reach_str))
-    return float(num[0]) if num else np.nan
-
-# --- Historical feature builder ---
-def build_historical_features(fight_df):
-    """Create expanding-window stats for each fighter up to (but not including) the current fight."""
-    stat_cols = [
-        'SIG_STR', 'SIG_STR_pct', 'TOTAL_STR', 'TD', 'TD_pct',
-        'SUB_ATT', 'REV', 'CTRL', 'HEAD', 'BODY', 'LEG',
-        'DISTANCE', 'CLINCH', 'GROUND'
-    ]
-    # Red corner data
-    red = fight_df[['R_fighter', 'B_fighter', 'Winner', 'date'] + [f'R_{c}' for c in stat_cols]].copy()
-    red.columns = ['fighter', 'opponent', 'winner', 'date'] + [c.lower() for c in stat_cols]
-    red['corner'] = 'red'
-    # Blue corner data
-    blue = fight_df[['B_fighter', 'R_fighter', 'Winner', 'date'] + [f'B_{c}' for c in stat_cols]].copy()
-    blue.columns = ['fighter', 'opponent', 'winner', 'date'] + [c.lower() for c in stat_cols]
-    blue['corner'] = 'blue'
-    
-    tall = pd.concat([red, blue], ignore_index=True)
-    tall['date'] = pd.to_datetime(tall['date'])
-    tall['won'] = (tall['winner'] == tall['fighter']).astype(int)
-    tall.sort_values(['fighter', 'date'], inplace=True)
-    
-    # Columns we want to turn into averages
-    metrics = ['sig_str', 'td', 'ctrl', 'sig_str_pct', 'td_pct']  # add more as needed
-    # Shift to exclude current fight
-    for col in metrics:
-        tall[col] = tall.groupby('fighter')[col].shift(1)
-    tall['won'] = tall.groupby('fighter')['won'].shift(1)
-    
-    # Expanding means (all history)
-    for col in metrics + ['won']:
-        tall[f'{col}_avg'] = tall.groupby('fighter')[col].expanding().mean().reset_index(level=0, drop=True)
-    
-    # Fight count (number of previous fights)
-    tall['fights_before'] = tall.groupby('fighter').cumcount()
-    
-    # Now we have a row for each fighter in each fight with historical stats.
-    # We'll merge back onto the original fight_df.
-    # Create Red historical features
-    red_hist = tall[tall['corner'] == 'red'].add_prefix('R_hist_').rename(columns={
-        'R_hist_fighter': 'R_fighter',
-        'R_hist_date': 'date'
-    })
-    keep_cols_red = ['R_fighter', 'date'] + [f'R_hist_{c}_avg' for c in metrics] + ['R_hist_won_avg', 'R_hist_fights_before']
-    red_hist = red_hist[keep_cols_red]
-    
-    # Create Blue historical features
-    blue_hist = tall[tall['corner'] == 'blue'].add_prefix('B_hist_').rename(columns={
-        'B_hist_fighter': 'B_fighter',
-        'B_hist_date': 'date'
-    })
-    keep_cols_blue = ['B_fighter', 'date'] + [f'B_hist_{c}_avg' for c in metrics] + ['B_hist_won_avg', 'B_hist_fights_before']
-    blue_hist = blue_hist[keep_cols_blue]
-    
-    # Merge historical features with the original fight data
-    fight_df = fight_df.merge(red_hist, on=['R_fighter', 'date'], how='left')
-    fight_df = fight_df.merge(blue_hist, on=['B_fighter', 'date'], how='left')
-    return fight_df
-
-# --- Main feature engineering ---
 def build_features():
     # Load raw data
     fighter_df = pd.read_csv(os.path.join(RAW_DIR, 'raw_fighter_details.csv'))
@@ -131,7 +40,39 @@ def build_features():
     master['R_age'] = (master['date'] - master['R_DOB']).dt.days / 365.25
     master['B_age'] = (master['date'] - master['B_DOB']).dt.days / 365.25
     
-    # Select final feature columns (static + historical)
+    # ── Build current (latest) fighter features for future predictions ──
+    # Do this while master still has fighter names
+    master_sorted = master.sort_values('date')
+    
+    # Red corner latest
+    latest_red = (
+        master_sorted.groupby('R_fighter')
+        .tail(1)[['R_fighter'] + [c for c in master.columns if c.startswith('R_')]]
+        .copy()
+        .rename(columns={'R_fighter': 'fighter'})
+    )
+    # Blue corner latest
+    latest_blue = (
+        master_sorted.groupby('B_fighter')
+        .tail(1)[['B_fighter'] + [c for c in master.columns if c.startswith('B_')]]
+        .copy()
+        .rename(columns={'B_fighter': 'fighter'})
+    )
+    # Combine and keep the most recent per fighter
+    # Drop duplicate column names like 'date' that appear in both
+    common_cols = set(latest_red.columns) & set(latest_blue.columns) - {'fighter'}
+    for col in common_cols:
+        # We'll keep the version from latest_red, drop from latest_blue
+        latest_blue.drop(columns=col, inplace=True, errors='ignore')
+    latest = pd.concat([latest_red, latest_blue], ignore_index=True)
+    # Now we have a single 'date' column from latest_red
+    latest = latest.sort_values('date').groupby('fighter').tail(1)
+    latest = latest.drop(columns='date', errors='ignore')
+    
+    save_to_db(latest, 'fighter_current_features')
+    print(f"Saved current features for {len(latest)} fighters.")
+    
+    # Select final feature columns for training (no fighter names)
     static_features = [
         'R_Height', 'R_Weight', 'R_Reach', 'R_Stance', 'R_age',
         'R_SLpM', 'R_Str_Acc', 'R_SApM', 'R_Str_Def',
@@ -154,9 +95,6 @@ def build_features():
     master.to_csv(os.path.join(PROCESSED_DIR, 'fight_features.csv'), index=False)
     print(f"Saved {len(master)} rows with {len(feature_cols)-2} features")
     
-    # Store in database
+    # Store training data in database
     save_to_db(master)
     return master
-
-if __name__ == '__main__':
-    build_features()

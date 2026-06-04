@@ -56,7 +56,6 @@ def train_model():
                     colsample_bytree=0.8,
                     scale_pos_weight=scale_pos_weight,
                     random_state=42,
-                    use_label_encoder=False,
                     eval_metric='logloss'
                 )
                 fold_scores = []

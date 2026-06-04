@@ -1,93 +1,60 @@
 import pandas as pd
 import numpy as np
-import re
 import joblib
 import sys
+from sqlalchemy import create_engine
 
-def height_to_inches(height_str):
-    if pd.isna(height_str):
-        return np.nan
-    match = re.match(r"(\d+)'\s*(\d+)\"?", str(height_str))
-    if match:
-        feet, inches = int(match.group(1)), int(match.group(2))
-        return feet * 12 + inches
-    return np.nan
+MODEL_PATH = 'models/ufc_model.pkl'
+DB_PATH = 'sqlite:///ufc.db'
 
-def weight_to_float(weight_str):
-    if pd.isna(weight_str):
-        return np.nan
-    num = re.findall(r"[\d.]+", str(weight_str))
-    return float(num[0]) if num else np.nan
-
-def reach_to_float(reach_str):
-    if pd.isna(reach_str):
-        return np.nan
-    num = re.findall(r"[\d.]+", str(reach_str))
-    return float(num[0]) if num else np.nan
-
-def pct_str_to_float(s):
-    if pd.isna(s):
-        return np.nan
-    try:
-        return float(s.strip('%')) / 100
-    except:
-        return np.nan
-
-def load_fighter_stats(name, fighter_df):
-    """Return a dict with keys matching the feature suffixes (e.g. 'Height', 'SLpM', 'age')."""
-    row = fighter_df[fighter_df['fighter_name'] == name]
-    if row.empty:
-        raise ValueError(f"Fighter '{name}' not found in database.")
-    row = row.iloc[0]
-    stats = {
-        'Height': height_to_inches(row.get('Height')),
-        'Weight': weight_to_float(row.get('Weight')),
-        'Reach': reach_to_float(row.get('Reach')),
-        'Stance': row.get('Stance') if pd.notna(row.get('Stance')) else 'Unknown',
-        'age': np.nan,   # age unknown, will be filled later
-        'SLpM': float(row['SLpM']) if pd.notna(row.get('SLpM')) else np.nan,
-        'Str_Acc': pct_str_to_float(row.get('Str_Acc')),
-        'SApM': float(row['SApM']) if pd.notna(row.get('SApM')) else np.nan,
-        'Str_Def': pct_str_to_float(row.get('Str_Def')),
-        'TD_Avg': float(row['TD_Avg']) if pd.notna(row.get('TD_Avg')) else np.nan,
-        'TD_Acc': pct_str_to_float(row.get('TD_Acc')),
-        'TD_Def': pct_str_to_float(row.get('TD_Def')),
-        'Sub_Avg': float(row['Sub_Avg']) if pd.notna(row.get('Sub_Avg')) else np.nan,
-    }
-    return stats
+# Feature order must match training exactly
+FEATURE_COLS = [
+    'R_Height', 'R_Weight', 'R_Reach', 'R_Stance', 'R_age',
+    'R_SLpM', 'R_Str_Acc', 'R_SApM', 'R_Str_Def',
+    'R_TD_Avg', 'R_TD_Acc', 'R_TD_Def', 'R_Sub_Avg',
+    'B_Height', 'B_Weight', 'B_Reach', 'B_Stance', 'B_age',
+    'B_SLpM', 'B_Str_Acc', 'B_SApM', 'B_Str_Def',
+    'B_TD_Avg', 'B_TD_Acc', 'B_TD_Def', 'B_Sub_Avg',
+    'R_hist_sig_str_avg', 'R_hist_td_avg', 'R_hist_ctrl_avg',
+    'R_hist_sig_str_pct_avg', 'R_hist_td_pct_avg', 'R_hist_won_avg', 'R_hist_fights_before',
+    'B_hist_sig_str_avg', 'B_hist_td_avg', 'B_hist_ctrl_avg',
+    'B_hist_sig_str_pct_avg', 'B_hist_td_pct_avg', 'B_hist_won_avg', 'B_hist_fights_before'
+]
 
 def predict_fight(fighter_a, fighter_b):
-    fighter_df = pd.read_csv('data/raw/raw_fighter_details.csv')
-    model = joblib.load('models/ufc_model.pkl')
+    engine = create_engine(DB_PATH)
+    model = joblib.load(MODEL_PATH)
 
-    red = load_fighter_stats(fighter_a, fighter_df)
-    blue = load_fighter_stats(fighter_b, fighter_df)
+    # Fetch latest features for both fighters
+    fighters_df = pd.read_sql("SELECT * FROM fighter_current_features", engine)
+    fighter_a_row = fighters_df[fighters_df['fighter'] == fighter_a]
+    fighter_b_row = fighters_df[fighters_df['fighter'] == fighter_b]
 
-    # Feature order exactly as used during training
-    feature_names = [
-        'R_Height', 'R_Weight', 'R_Reach', 'R_Stance', 'R_age',
-        'R_SLpM', 'R_Str_Acc', 'R_SApM', 'R_Str_Def',
-        'R_TD_Avg', 'R_TD_Acc', 'R_TD_Def', 'R_Sub_Avg',
-        'B_Height', 'B_Weight', 'B_Reach', 'B_Stance', 'B_age',
-        'B_SLpM', 'B_Str_Acc', 'B_SApM', 'B_Str_Def',
-        'B_TD_Avg', 'B_TD_Acc', 'B_TD_Def', 'B_Sub_Avg'
-    ]
+    if fighter_a_row.empty or fighter_b_row.empty:
+        raise ValueError("One or both fighters not found in database.")
 
+    # Get first (latest) row for each
+    a_feats = fighter_a_row.iloc[0]
+    b_feats = fighter_b_row.iloc[0]
+
+    # Build the input row
     X_dict = {}
-    for feat in feature_names:
-        # suffix is the key inside red/blue dict (e.g. 'Height', 'SLpM', 'age')
-        suffix = feat[2:]
-        stats = red if feat.startswith('R_') else blue
-        X_dict[feat] = stats[suffix]
+    for feat in FEATURE_COLS:
+        if feat.startswith('R_'):
+            key = feat  # the column in the table is exactly like 'R_Height', etc.
+            X_dict[feat] = a_feats.get(key, np.nan)
+        else:  # B_
+            key = feat
+            X_dict[feat] = b_feats.get(key, np.nan)
 
     X = pd.DataFrame([X_dict])
 
-    # Encode stance categories (same mapping as used in training)
+    # Encode stance (same mapping as training)
     stance_map = {'Orthodox': 0, 'Southpaw': 1, 'Switch': 2, 'Open Stance': 3, 'Unknown': 4}
     X['R_Stance'] = X['R_Stance'].fillna('Unknown').map(stance_map).fillna(4)
     X['B_Stance'] = X['B_Stance'].fillna('Unknown').map(stance_map).fillna(4)
 
-    # Fill remaining NaN with 0 (or better with training medians, but 0 is okay for now)
+    # Fill any remaining NaN with 0 (or median from training, but 0 is okay)
     X = X.fillna(0)
 
     prob = model.predict_proba(X)[0, 1]
@@ -99,5 +66,8 @@ if __name__ == '__main__':
         sys.exit(1)
     fighter_a = sys.argv[1]
     fighter_b = sys.argv[2]
-    prob = predict_fight(fighter_a, fighter_b)
-    print(f"Probability that {fighter_a} (Red corner) wins: {prob:.2%}")
+    try:
+        prob = predict_fight(fighter_a, fighter_b)
+        print(f"Probability that {fighter_a} (Red corner) wins: {prob:.2%}")
+    except Exception as e:
+        print(f"Error: {e}")

@@ -20,7 +20,7 @@ def predict():
         return jsonify({
             'fighter_a': fighter_a,
             'fighter_b': fighter_b,
-            'probability_red_wins': prob
+            'probability_red_wins': float(prob)
         })
     except Exception as e:
         return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500

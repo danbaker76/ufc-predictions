@@ -58,7 +58,7 @@ def predict_fight(fighter_a, fighter_b):
     X = X.fillna(0)
 
     prob = model.predict_proba(X)[0, 1]
-    return prob
+    return float(prob)
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:
